@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [Unreleased]
+
+### 新增：本地 A 股数据库（单文件 SQLite，可拷贝迁移，跨工具共用）
+
+- `scripts/ingest_localdb.py`：新浪直连批量入库——全市场列表（沪深京 5,500+ 只）、
+  全历史日线（实测穿透到上市首日，如 000001 自 1991-04-03 共 8,400+ 根）、后复权
+  因子（事件日序列）、财报三表全历史（`--fundamentals`，含每期公告日/入库时间）。
+  默认增量（只补缺口）、幂等可重跑、单只失败不拖垮全量、Ctrl-C 中断后重跑即续。
+- `tradingagents/dataflows/localdb.py`：库 schema 与读写辅助。六张表：stock_basic /
+  daily_bars / hfq_factors / financials / financial_meta / meta。价格为不复权原值、
+  量为股、日期 TEXT YYYY-MM-DD，外部工具可直接读（见 README 的表约定与示例 SQL）。
+- 工具读路径接入：库存在时日线（`get_stock_data` / 指标链路）与财报三表优先读库，
+  缺的在线补并回写；新浪财报不可达时退回本地旧数据而非报错。库不存在则行为与
+  以前完全相同（零成本可选）。库路径：`local_db_path` 配置 / `TRADINGAGENTS_LOCAL_DB`
+  环境变量 / `--db` 参数，指到移动硬盘即可随盘迁移。
+- 披露判定（point-in-time 谓词）从 a_stock 抽到 localdb 与离线路径共用同一份，
+  语义不变——原有 20+ 个披露时点测试全部通过；离线读取用库内公告日/入库时间
+  复现与在线一致的未来函数防护（实测：分析日 2025-04-01 正确看不到 04-02 才
+  披露的茅台 2024 年报）。
+
 ## [0.5.21] — 2026-10-11
 
 ### 修复：资产负债表 / 利润表 / 现金流量表此前一直是空表（#116，#117 by @ontheway06）

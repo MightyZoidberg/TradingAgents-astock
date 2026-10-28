@@ -31,6 +31,19 @@ def _dummy_api_keys(monkeypatch):
         monkeypatch.setenv(env_var, os.environ.get(env_var, "placeholder"))
 
 
+@pytest.fixture(autouse=True)
+def _no_local_db(tmp_path):
+    """所有测试一律不碰本地 A 股库（哪怕机器上真有 astock.db）。
+
+    dataflows 的 a_stock/localdb 路径会把"库存在"当作启用信号；不隔离的话，
+    开发机上真实入库过的库会让被 mock 的在线测试读到脏数据。
+    """
+    from tradingagents.dataflows import config as df_config
+
+    df_config.set_config({"local_db_path": str(tmp_path / "nonexistent-astock.db")})
+    yield
+
+
 @pytest.fixture()
 def mock_llm_client():
     client = MagicMock()

@@ -6,6 +6,10 @@ DEFAULT_CONFIG = {
     "project_dir": os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR", os.path.join(_TRADINGAGENTS_HOME, "logs")),
     "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR", os.path.join(_TRADINGAGENTS_HOME, "cache")),
+    # 本地 A 股数据库（SQLite 单文件）。由 scripts/ingest_localdb.py 负责创建；
+    # 工具运行时只读写已存在的库（没有就自动走在线取数）。要放移动硬盘/同步盘，
+    # 设 TRADINGAGENTS_LOCAL_DB 指到目标路径即可。
+    "local_db_path": os.getenv("TRADINGAGENTS_LOCAL_DB", os.path.join(_TRADINGAGENTS_HOME, "astock.db")),
     "memory_log_path": os.getenv("TRADINGAGENTS_MEMORY_LOG_PATH", os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_memory.md")),
     # Optional cap on the number of resolved memory log entries. When set,
     # the oldest resolved entries are pruned once this limit is exceeded.

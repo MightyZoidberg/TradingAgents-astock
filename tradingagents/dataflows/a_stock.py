@@ -34,6 +34,7 @@ import pandas as pd
 import requests as _requests
 
 from .utils import safe_ticker_component
+from . import localdb
 
 logger = logging.getLogger(__name__)
 
@@ -735,8 +736,25 @@ def _supplement_stale_ohlcv_with_sina(
 
 
 # ---------------------------------------------------------------------------
-# OHLCV loading with cache (mootdx -> CSV)
+# OHLCV loading with cache (mootdx -> CSV + local SQLite)
 # ---------------------------------------------------------------------------
+
+
+def _write_daily_to_localdb(code: str, df: pd.DataFrame) -> None:
+    """在线取到的日线回写本地 SQLite 库；库不存在就跳过，写失败不影响主流程。"""
+    conn = localdb.open_existing()
+    if conn is None:
+        return
+    try:
+        localdb.upsert_daily_bars(conn, code, df)
+        conn.commit()
+    except Exception as e:
+        logger.warning("localdb daily write-back failed for %s: %s", code, e)
+        with contextlib.suppress(Exception):
+            conn.rollback()
+    finally:
+        conn.close()
+
 
 def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV via mootdx, cache to CSV, filter by curr_date.
@@ -747,6 +765,21 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
     from .config import get_config
 
     code = _normalize_ticker(symbol)
+
+    # 本地 SQLite 库优先，新鲜度口径与下面的 CSV 缓存一致（覆盖到请求日，或今天
+    # 刷过这只票）。库不存在时 open_existing 返回 None，走原有在线路径。
+    local_conn = localdb.open_existing()
+    if local_conn is not None:
+        try:
+            if localdb.daily_data_is_fresh(local_conn, code, curr_date):
+                cached = localdb.load_daily_bars(local_conn, code, end=curr_date)
+                if not cached.empty:
+                    return cached
+        except Exception as e:
+            logger.warning("localdb daily read failed for %s: %s", code, e)
+        finally:
+            local_conn.close()
+
     config = get_config()
     cache_dir = config.get(
         "data_cache_dir", os.path.expanduser("~/.tradingagents/cache")
@@ -804,6 +837,7 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
 
     # Cache to disk
     df.to_csv(cache_file, index=False, encoding="utf-8")
+    _write_daily_to_localdb(code, df)
 
     # Filter by curr_date to prevent look-ahead bias
     cutoff = pd.to_datetime(curr_date)
@@ -826,46 +860,66 @@ def get_stock_data(
     """Get OHLCV stock price data via mootdx."""
     code = _normalize_ticker(symbol)
 
+    df = None
     data_source = "mootdx (TCP)"
-    try:
-        df = _mootdx_call("bars", symbol=code, category=4, offset=800)
 
-        if df is None or df.empty:
-            raise ValueError(f"No data from mootdx for {code}")
-
-        # Drop duplicate datetime column + extra columns before reset_index
-        df = df.drop(
-            columns=["datetime", "year", "month", "day", "hour", "minute"],
-            errors="ignore",
-        )
-        df = df.reset_index()  # index 'datetime' → column 'datetime'
-        df = df.rename(
-            columns={
-                "datetime": "Date",
-                "open": "Open",
-                "close": "Close",
-                "high": "High",
-                "low": "Low",
-                "volume": "Volume",
-                "amount": "Amount",
-            }
-        )
-        df = _normalize_ohlcv_dates(df)
-
-    except Exception as e:
-        logger.warning("mootdx K-line failed for %s: %s, trying sina HTTP fallback", code, e)
-        # Fallback: Sina direct HTTP API
+    # 本地 SQLite 库优先：新鲜（覆盖到 end_date 或今天刷过）就直接用
+    local_conn = localdb.open_existing()
+    if local_conn is not None:
         try:
-            df = _sina_kline_fallback(code, start_date, end_date)
-            if df.empty:
-                return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"
-            data_source = "sina HTTP (fallback)"
-        except Exception:
-            return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"
+            if localdb.daily_data_is_fresh(local_conn, code, end_date):
+                df = localdb.load_daily_bars(local_conn, code, start_date, end_date)
+                if not df.empty:
+                    data_source = "local SQLite db"
+        except Exception as e:
+            logger.warning("localdb daily read failed for %s: %s", code, e)
+            df = None
+        finally:
+            local_conn.close()
 
-    df, supplemented = _supplement_stale_ohlcv_with_sina(code, df, end_date, start_date)
-    if supplemented:
-        data_source = f"{data_source} + sina HTTP supplement"
+    if df is None or df.empty:
+        try:
+            df = _mootdx_call("bars", symbol=code, category=4, offset=800)
+
+            if df is None or df.empty:
+                raise ValueError(f"No data from mootdx for {code}")
+
+            # Drop duplicate datetime column + extra columns before reset_index
+            df = df.drop(
+                columns=["datetime", "year", "month", "day", "hour", "minute"],
+                errors="ignore",
+            )
+            df = df.reset_index()  # index 'datetime' → column 'datetime'
+            df = df.rename(
+                columns={
+                    "datetime": "Date",
+                    "open": "Open",
+                    "close": "Close",
+                    "high": "High",
+                    "low": "Low",
+                    "volume": "Volume",
+                    "amount": "Amount",
+                }
+            )
+            df = _normalize_ohlcv_dates(df)
+
+        except Exception as e:
+            logger.warning("mootdx K-line failed for %s: %s, trying sina HTTP fallback", code, e)
+            # Fallback: Sina direct HTTP API
+            try:
+                df = _sina_kline_fallback(code, start_date, end_date)
+                if df.empty:
+                    return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"
+                data_source = "sina HTTP (fallback)"
+            except Exception:
+                return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"
+
+        df, supplemented = _supplement_stale_ohlcv_with_sina(code, df, end_date, start_date)
+        if supplemented:
+            data_source = f"{data_source} + sina HTTP supplement"
+
+        # 在线结果回写本地库（没有库就跳过）
+        _write_daily_to_localdb(code, df)
 
     # Filter by date range
     start_dt = pd.to_datetime(start_date)
@@ -1166,20 +1220,9 @@ def _sina_stock_code(code: str) -> str:
 # 新浪每期报表附带的公告日 / 入库时间，只在内部判断是否已公布，不返回
 _SINA_PUBLISHED = "_公告日"
 _SINA_UPDATED = "_入库时间"
-# 新浪给全市场做批量入库的那一天，之前的各期共用这一天的一个入库时间（见下面的筛选）
-_SINA_BATCH_IMPORT_DAY = pd.Timestamp("2020-03-13")
-
-# 定期报告法定披露截止：一季报、三季报在报告期结束后 1 个月内，半年报 2 个月内，年报 4 个月内
-_REPORT_DEADLINE_MONTHS = {3: 1, 6: 2, 9: 1, 12: 4}
-
-
-def _report_deadline(report_date: pd.Series) -> pd.Series:
-    """报告期 → 法定披露截止日（报告期都是月末，按月末顺延）；非标准报告期保守按 4 个月。"""
-    deadline = report_date + pd.offsets.MonthEnd(4)
-    for month, lag in _REPORT_DEADLINE_MONTHS.items():
-        hit = report_date.dt.month == month
-        deadline[hit] = report_date[hit] + pd.offsets.MonthEnd(lag)
-    return deadline
+# 披露截止/批量入库日的判定本体已抽到 localdb（离线路径共用同一份，避免两处漂移）；
+# 保留别名供既有测试与调用方使用。
+_report_deadline = localdb.report_deadline
 
 
 def _sina_report_num(curr_date: str = None) -> int:
@@ -1193,12 +1236,48 @@ def _sina_report_num(curr_date: str = None) -> int:
     return min(120, 20 + max(0, days_back) // 91)
 
 
-def _get_financial_report_sina(
-    code: str, report_type: str, freq: str, curr_date: str = None,
-) -> pd.DataFrame:
-    """Shared helper: fetch financial report via Sina direct HTTP API.
+def _finish_financial_df(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    """披露过滤之后的收尾（在线/离线两条路共用）：排序、annual 过滤、取前 8 期。"""
+    # 最新的报告期在前（不依赖接口返回的顺序），下面只取前 8 期
+    if "报告日" in df.columns:
+        order = pd.to_datetime(df["报告日"], errors="coerce").sort_values(
+            ascending=False, na_position="last"
+        )
+        df = df.loc[order.index]
 
-    report_type: '资产负债表' | '利润表' | '现金流量表'
+    # Filter by frequency (annual = month 12 reports only)
+    if freq.lower() == "annual" and "报告日" in df.columns:
+        months = pd.to_datetime(df["报告日"], errors="coerce").dt.month
+        df = df[months == 12]
+
+    # 两个日期列只用于披露判定；较早报告期的日期是后来改写的，放进表里会误导分析师
+    return df.drop(columns=[_SINA_PUBLISHED, _SINA_UPDATED], errors="ignore").head(8)
+
+
+def _write_financial_to_localdb(code: str, report_type: str, df: pd.DataFrame) -> None:
+    """解析出的财报宽表（含披露元信息列）回写本地库；没有库/写失败都不影响主流程。"""
+    conn = localdb.open_existing()
+    if conn is None:
+        return
+    try:
+        localdb.upsert_financial(conn, code, report_type, df)
+        conn.commit()
+    except Exception as e:
+        logger.warning("localdb financial write-back failed for %s: %s", code, e)
+        with contextlib.suppress(Exception):
+            conn.rollback()
+    finally:
+        conn.close()
+
+
+def _fetch_financial_report_sina_raw(
+    code: str, report_type: str, num: int,
+) -> pd.DataFrame:
+    """新浪财报原始抓取+解析（工具在线路径与批量入库脚本共用）。
+
+    返回未过滤的宽表：报告日 + 科目列 + _公告日/_入库时间（披露判定要用，别删）。
+    num 控制抓取期数：分析回看越早要得越多（见 _sina_report_num），批量入库要
+    全历史（120 期 ≈ 30 年）。空表 = 无数据。
     """
     _report_type_map = {
         "资产负债表": "fzb",
@@ -1215,7 +1294,7 @@ def _get_financial_report_sina(
         "source": source_type,
         "type": "0",
         "page": "1",
-        "num": str(_sina_report_num(curr_date)),
+        "num": str(num),
     }
     r = _requests.get(url, params=params, headers={"User-Agent": _UA}, timeout=15)
     d = r.json()
@@ -1249,7 +1328,6 @@ def _get_financial_report_sina(
                         title = f"{title}（{item.get('item_field') or len(row)}）"
                     row[title] = item.get("item_value")
                 if len(row) > 1:
-                    # 这两列只用于下面按分析日判断是否已公布，返回前去掉
                     row[_SINA_PUBLISHED] = payload.get("publish_date")
                     row[_SINA_UPDATED] = payload.get("update_time")
                     rows.append(row)
@@ -1259,14 +1337,63 @@ def _get_financial_report_sina(
 
     if not items:
         return pd.DataFrame()
+    return pd.DataFrame(items)
 
-    df = pd.DataFrame(items)
+
+def _get_financial_report_sina(
+    code: str, report_type: str, freq: str, curr_date: str = None,
+) -> pd.DataFrame:
+    """Shared helper: fetch financial report via Sina direct HTTP API.
+
+    report_type: '资产负债表' | '利润表' | '现金流量表'
+    """
+    # 本地 SQLite 库优先：今天入库过这个 (code, report_type) 就离线读（披露判定
+    # 用库里存的每期公告日/入库时间，谓词与在线路径同一份）。不新鲜时也先读出来
+    # 备着——新浪不可达时退回本地旧数据，好过直接报错。
+    local_df = None
+    local_conn = localdb.open_existing()
+    if local_conn is not None:
+        try:
+            local_df = localdb.load_financial(
+                local_conn, code, report_type, curr_date
+            )
+            if local_df is not None and localdb.financial_data_is_fresh(
+                local_conn, code, report_type
+            ):
+                return _finish_financial_df(local_df, freq)
+        except Exception as e:
+            logger.warning("localdb financial read failed for %s: %s", code, e)
+            local_df = None
+        finally:
+            local_conn.close()
+
+    try:
+        df = _fetch_financial_report_sina_raw(
+            code, report_type, _sina_report_num(curr_date)
+        )
+    except Exception as e:
+        if local_df is not None:
+            logger.warning(
+                "新浪财报接口不可达（%s），%s %s 改用本地库数据（可能略旧）",
+                e, code, report_type,
+            )
+            return _finish_financial_df(local_df, freq)
+        raise
+
+    if df.empty:
+        return df
+
+    # 落库存**未过滤**的原始期 + 每期披露元信息（_公告日/_入库时间），
+    # 离线读取时用它们复现同一套披露判定。
+    _write_financial_to_localdb(code, report_type, df)
 
     # Filter by curr_date：报告期在分析日之前还不够，财报还得在分析日之前已经公布。
     # 例：分析日 07-15 时 06-30 的半年报要到 8 月才公布，只按报告期筛会提前看到它。
     # 新浪每期给两个日期，都不会早于这期数字公布的时间，但都可能被后来的报表改写：
     # publish_date 是最近一次刊出这期数字的报表日期（次年同期报表把它当对比数再刊出
-    # 时会改写），update_time 是入库 / 最近改数的时间（多数是公布前一晚）。所以：
+    # 时会改写），update_time 是入库 / 最近改数的时间（多数是公布前一晚）。判定本体在
+    # localdb.disclosure_available（离线路径共用同一份），细则见其 docstring 和下面的
+    # 历史注释：
     # - 公告日早于分析日，或入库时间早于分析日当天 → 已公布（公告日当天收盘后才发的也有，
     #   所以要严格早于）；
     # - 两个日期都晚于报告期一年以上（或都没有，如行列表）→ 原始公布日已被改写丢失，只能
@@ -1298,35 +1425,9 @@ def _get_financial_report_sina(
             .dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
             if _SINA_UPDATED in df.columns else nat
         )
-        published = published.where(published > report)
-        batch = (updated.dt.normalize() == _SINA_BATCH_IMPORT_DAY) & (
-            updated.map(updated.value_counts()) >= 3
-        )
-        year_later = report + pd.DateOffset(years=1)
-        original_lost = (published.isna() | (published >= year_later)) & (
-            updated.isna() | (updated >= year_later) | batch
-        )
-        available = (
-            (published < cutoff)
-            | (updated < cutoff)
-            | (original_lost & (_report_deadline(report) < cutoff))
-        )
-        df = df[available]
+        df = df[localdb.disclosure_available(report, published, updated, cutoff)]
 
-    # 最新的报告期在前（不依赖接口返回的顺序），下面只取前 8 期
-    if "报告日" in df.columns:
-        order = pd.to_datetime(df["报告日"], errors="coerce").sort_values(
-            ascending=False, na_position="last"
-        )
-        df = df.loc[order.index]
-
-    # Filter by frequency (annual = month 12 reports only)
-    if freq.lower() == "annual" and "报告日" in df.columns:
-        months = pd.to_datetime(df["报告日"], errors="coerce").dt.month
-        df = df[months == 12]
-
-    # 两个日期列只用于上面的筛选；较早报告期的日期是后来改写的，放进表里会误导分析师
-    return df.drop(columns=[_SINA_PUBLISHED, _SINA_UPDATED], errors="ignore").head(8)
+    return _finish_financial_df(df, freq)
 
 
 def get_balance_sheet(

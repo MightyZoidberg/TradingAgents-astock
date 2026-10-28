@@ -152,6 +152,57 @@
 
 > **数据源优先级 & 东财防封（v0.2.11）**：行情 / K线 / 市值 / 财务能从 mootdx（通达信 TCP，不封 IP）或腾讯拿到的，一律走它们；东财只用于它独有的数据（龙虎榜 / 解禁 / 资金流 / 板块 / 个股新闻等）。所有东财请求统一走内置节流入口 `_em_get()`：串行限流（默认间隔 ≥1s + 0.1~0.5s 随机抖动）+ 复用 Keep-Alive 会话，多 Agent 跑批量分析不再触发临时封 IP（东财风控实测：每秒 >5 / 并发 ≥10 / 1 分钟 ≥200 触发封禁）。批量场景可设环境变量 `EM_MIN_INTERVAL=1.5~2` 进一步降速。**仅东财限流，mootdx / 腾讯 / 新浪 / 同花顺 / 财联社 / 百度 不受影响。**
 
+## 本地数据库（可选）
+
+把 A 股历史数据沉淀成一个**单文件 SQLite 库**：本工具自动优先读它，其它工具（Excel / Python / DuckDB / R / 任何能开 SQLite 的软件）也能直接读，整文件拷贝即可在电脑间迁移（U 盘 / 移动硬盘 / 同步盘皆可）。
+
+### 入库
+
+```bash
+# 首次 & 日常增量（全市场：股票列表 + 全历史日线 + 后复权因子，约 30~60 分钟）
+python scripts/ingest_localdb.py
+
+# 加上财报三表全历史（每只 3 次请求，全市场约 3~4 小时，建议夜里跑）
+python scripts/ingest_localdb.py --fundamentals
+
+# 只入指定的几只 / 试试水
+python scripts/ingest_localdb.py --stocks 600519,000001
+python scripts/ingest_localdb.py --limit 5
+
+# 库放移动硬盘：加 --db，或设环境变量 TRADINGAGENTS_LOCAL_DB
+python scripts/ingest_localdb.py --db E:/astock/astock.db
+```
+
+- 增量是默认行为：已有的股票只补最新缺口，没有的抓全历史（实测可穿透到上市首日，如 000001 自 1991-04-03 共 8,400+ 根）。重复运行安全，中断后重跑即续上。
+- 引擎是新浪直连（东财行情接口和通达信 TCP 在部分网络环境被拦，新浪最通用）；AKShare 等第三方接口库以后可作为可选引擎接入，表结构不变。
+- 入库进程正常退出后库目录只剩一个 `.db` 文件；**拷贝迁移前确认没有进程在跑脚本或本工具**。
+
+### 工具怎么用它
+
+工具运行时**只读写已存在的库**：没有库文件就完全走原在线逻辑，行为与以前相同；有库则日线 / 财报优先读库（当日入库过即视为新鲜），库缺的自动在线补并回写。新浪财报接口不可达时会退回本地库数据（可能略旧）并打日志说明，而不是直接报错。
+
+### 给其它工具的读法
+
+| 表 | 内容 | 关键约定 |
+|----|------|---------|
+| `stock_basic` | 全市场证券列表（沪深京） | code 6 位，exchange = SH/SZ/BJ |
+| `daily_bars` | 日线 OHLCV，主键 (code, date) | 价格**不复权**，成交量单位**股** |
+| `hfq_factors` | 后复权因子（事件日稀疏） | 按日 forward-fill 后：后复权价 = 原价 × factor，前复权 = × factor ÷ 最新 factor |
+| `financials` | 财报三表（长表，每期每科目一行） | value 为原始字符串，SQL 里可直接 CAST |
+| `financial_meta` | 每期公告日 / 入库时间 | point-in-time（避免未来函数）判定的依据 |
+
+```sql
+-- 例：读茅台 2024 年以来日线，并用因子算后复权收盘价（SQLite 3.45+ 支持窗口函数）
+WITH f AS (
+  SELECT d.date, d.close, LAST_VALUE(h.factor) IGNORE NULLS OVER (
+    ORDER BY d.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS factor
+  FROM daily_bars d LEFT JOIN hfq_factors h ON h.code = d.code AND h.date = d.date
+  WHERE d.code = '600519'
+)
+SELECT date, close, factor, ROUND(close * factor, 2) AS close_hfq FROM f
+WHERE date >= '2024-01-01';
+```
+
 ## 快速开始
 
 ### 1. 环境准备

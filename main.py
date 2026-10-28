@@ -10,11 +10,11 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 load_dotenv()
 
-# ── MiniMax 示例（推荐）─────────────────────────────
+# ── 智谱 GLM 示例 ───────────────────────────────────
 config = {
-    "llm_provider": "minimax",
-    "deep_think_llm": "MiniMax-M2.7",
-    "quick_think_llm": "MiniMax-M2.7-highspeed",
+    "llm_provider": "glm",
+    "deep_think_llm": "glm-5.3",
+    "quick_think_llm": "glm-5.3-flash",
     "output_language": "Chinese",
 }
 
