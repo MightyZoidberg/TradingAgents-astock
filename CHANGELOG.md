@@ -21,6 +21,10 @@ Breaking changes within the 0.x line are called out explicitly.
   缺的在线补并回写；新浪财报不可达时退回本地旧数据而非报错。库不存在则行为与
   以前完全相同（零成本可选）。库路径：`local_db_path` 配置 / `TRADINGAGENTS_LOCAL_DB`
   环境变量 / `--db` 参数，指到移动硬盘即可随盘迁移。
+- 库默认位置与本仓库平级（仓库的上级目录，如仓库在 `C:\Tools\TradingAgents-astock`
+  则库为 `C:\Tools\astock.db`）——它是跨工具共享的数据资产，不是本工具的私有配置。
+  旧版默认位置 `~/.tradingagents/astock.db` 仍会被读到（两处都没有库才走在线），
+  把文件移到新位置即完成迁移。
 - 披露判定（point-in-time 谓词）从 a_stock 抽到 localdb 与离线路径共用同一份，
   语义不变——原有 20+ 个披露时点测试全部通过；离线读取用库内公告日/入库时间
   复现与在线一致的未来函数防护（实测：分析日 2025-04-01 正确看不到 04-02 才

@@ -137,17 +137,28 @@ def _market_today_str() -> str:
     return datetime.now(_MARKET_TZ).strftime("%Y-%m-%d")
 
 
+# 旧版默认位置。库还留在旧位置、尚未迁到新默认位置（与本仓库平级）的部署
+# 继续读旧位置，免得升级后"库不见了"而静默回退在线取数。
+_LEGACY_LOCAL_DB_PATH = os.path.join(
+    os.path.expanduser("~"), ".tradingagents", "astock.db"
+)
+
+
 def get_local_db_path() -> str:
     """本地库路径：配置 local_db_path > 环境变量 TRADINGAGENTS_LOCAL_DB > 默认。"""
+    from ..default_config import DEFAULT_LOCAL_DB_PATH
     from .config import get_config
 
     path = get_config().get("local_db_path")
     if not path:
         path = os.getenv("TRADINGAGENTS_LOCAL_DB")
     if not path:
-        path = os.path.join(
-            os.path.expanduser("~"), ".tradingagents", "astock.db"
-        )
+        path = DEFAULT_LOCAL_DB_PATH
+    # 解析到内置默认（未显式指定）而默认位置还没有库、旧位置有：先读旧位置。
+    # 显式指定的路径一律照用——哪怕是尚不存在的新库，入库脚本正要在那里建库。
+    if path == DEFAULT_LOCAL_DB_PATH and not os.path.exists(path):
+        if os.path.exists(_LEGACY_LOCAL_DB_PATH):
+            path = _LEGACY_LOCAL_DB_PATH
     return path
 
 

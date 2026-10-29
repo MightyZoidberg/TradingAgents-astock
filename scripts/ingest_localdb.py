@@ -237,7 +237,7 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--db", default=None,
-                        help="库文件路径（默认 TRADINGAGENTS_LOCAL_DB / ~/.tradingagents/astock.db）")
+                        help="库文件路径（默认 TRADINGAGENTS_LOCAL_DB / 本仓库上级目录的 astock.db）")
     parser.add_argument("--stocks", default=None,
                         help="逗号分隔的 6 位代码列表；不给 = 全市场")
     parser.add_argument("--stocks-file", default=None,

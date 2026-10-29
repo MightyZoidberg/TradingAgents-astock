@@ -156,6 +156,8 @@
 
 把 A 股历史数据沉淀成一个**单文件 SQLite 库**：本工具自动优先读它，其它工具（Excel / Python / DuckDB / R / 任何能开 SQLite 的软件）也能直接读，整文件拷贝即可在电脑间迁移（U 盘 / 移动硬盘 / 同步盘皆可）。
 
+默认存放在**与本仓库平级**的上级目录（仓库在 `C:\Tools\TradingAgents-astock`，库就是 `C:\Tools\astock.db`）——它是跨工具共享的数据资产，不藏在 `~/.tradingagents` 里。旧版本建的 `~/.tradingagents/astock.db` 不动也能继续读到；想迁到新位置，把文件移过去即可。
+
 ### 入库
 
 ```bash

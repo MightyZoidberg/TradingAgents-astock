@@ -217,3 +217,7 @@ __marimo__/
 
 # Cache
 **/data_cache/
+
+# 本地 A 股数据库（默认在 ~/.tradingagents/，仓库外；若 TRADINGAGENTS_LOCAL_DB
+# 指进仓库目录或整盘拷贝迁入，也不要提交）
+astock.db*
