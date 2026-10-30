@@ -219,11 +219,13 @@ class MinimaxChatOpenAI(NormalizedChatOpenAI):
             payload.setdefault("reasoning_split", True)
         return payload
 
-# Kwargs forwarded from user config to ChatOpenAI
+# Kwargs forwarded from user config to ChatOpenAI.
+# streaming / stream_usage 也在其中：get_llm() 里对两者 setdefault 默认开启，
+# 进了这张表才存在真正的逃生口（显式传 False 以用户为准）。
 _PASSTHROUGH_KWARGS = (
     "timeout", "max_retries", "reasoning_effort", "max_tokens",
     "api_key", "callbacks", "http_client", "http_async_client",
-    "stream_usage",
+    "stream_usage", "streaming",
 )
 
 # Provider base URLs and API key env vars
@@ -345,18 +347,23 @@ class OpenAIClient(BaseLLMClient):
         # AIMessage so callers see no difference.
         base_url_for_check = llm_kwargs.get("base_url", "") or ""
         is_opencode_go = "opencode.ai" in base_url_for_check
-        if is_opencode_go:
-            llm_kwargs.setdefault("streaming", True)
-            # 开流式就必须一起开 stream_usage，否则 token 统计**静默归零**：
-            # langchain 只在非流式回复上自带 usage_metadata，流式下要显式
-            # stream_options.include_usage 才带得回来；而它的自动开启逻辑在设了
-            # openai_api_base 时直接跳过（ChatOpenAI._should_stream_usage）——
-            # opencode 这条路恒定设了 base_url，所以永远轮不到自动开启。
-            # 后果不报错：cli/stats_handler.py 只认 usage_metadata，整轮跑完面板
-            # 写 tokens_in=0 / tokens_out=0，看起来像"这次没花钱"。
-            # 用 setdefault 是为了留逃生口：stream_usage 在 _PASSTHROUGH_KWARGS 里，
-            # 用户显式传 False 时以用户的为准。
-            llm_kwargs.setdefault("stream_usage", True)
+        # 流式从 opencode 专用推广为**所有走本客户端请求的默认值**（v0.5.22）：
+        # 思考型模型（GLM-5.x / MiniMax M2 / DeepSeek R 系）非流式下要整段答案
+        # （含思考）生成完才回包，读超时（默认 150s）掐死的是"还在干活"的请求，
+        # 而不是死连接——实测 Bull Researcher 一节点烧满 4×150s 重试才报错。
+        # 流式下超时语义变为"两个 chunk 之间无数据"，边生成边收就永远不会误杀。
+        # langchain 聚合 chunk 回单个 AIMessage，调用方无感。
+        llm_kwargs.setdefault("streaming", True)
+        # 开流式就必须一起开 stream_usage，否则 token 统计**静默归零**：
+        # langchain 只在非流式回复上自带 usage_metadata，流式下要显式
+        # stream_options.include_usage 才带得回来；而它的自动开启逻辑在设了
+        # openai_api_base 时直接跳过（ChatOpenAI._should_stream_usage）——
+        # 本客户端给每个 provider 都设了 base_url，所以永远轮不到自动开启。
+        # 后果不报错：cli/stats_handler.py 只认 usage_metadata，整轮跑完面板
+        # 写 tokens_in=0 / tokens_out=0，看起来像"这次没花钱"。
+        # 用 setdefault 是为了留逃生口：streaming / stream_usage 都在
+        # _PASSTHROUGH_KWARGS 里，用户显式传 False 时以用户的为准。
+        llm_kwargs.setdefault("stream_usage", True)
 
         # DeepSeek's thinking-mode quirks live in their own subclass so the
         # base NormalizedChatOpenAI stays free of provider-specific branches.

@@ -25,6 +25,21 @@ PIPELINE_STAGES: list[dict[str, str]] = [
 
 STAGE_IDS = [s["id"] for s in PIPELINE_STAGES]
 
+# 前 7 个阶段是分析师，其余是固定流水线节点。勾选分析项（#selected_analysts）
+# 只影响前者的取舍：质量门控之后的多空辩论、交易决策、风控、最终决策永远都在。
+ANALYST_STAGE_IDS = [s["id"] for s in PIPELINE_STAGES[:7]]
+POST_STAGE_IDS = [s["id"] for s in PIPELINE_STAGES[7:]]
+ALL_ANALYST_IDS = list(ANALYST_STAGE_IDS)
+
+
+def visible_stages(selected_analysts: list[str] | None) -> list[dict[str, str]]:
+    """勾选的分析师阶段 + 固定流水线阶段，保持 PIPELINE_STAGES 的原顺序。"""
+    selected = set(selected_analysts) if selected_analysts is not None else set(ALL_ANALYST_IDS)
+    return [
+        s for s in PIPELINE_STAGES
+        if s["id"] not in ANALYST_STAGE_IDS or s["id"] in selected
+    ]
+
 
 @dataclass
 class ProgressTracker:
@@ -41,11 +56,18 @@ class ProgressTracker:
     error: Optional[str] = None
 
     current_stage: str = ""
+    # 本次运行勾选的分析师（id 与 PIPELINE_STAGES 前 7 项一致）。
+    # 决定进度面板显示哪些阶段、活跃阶段推断跳过哪些阶段。
+    selected_analysts: list[str] = field(default_factory=lambda: list(ALL_ANALYST_IDS))
     completed_stages: list[str] = field(default_factory=list)
     stage_reports: dict[str, str] = field(default_factory=dict)
 
     final_state: dict[str, Any] = field(default_factory=dict)
     signal: str = ""
+
+    # 面板可见的运行提示（LLM 重试等）。重试原先只写日志文件，用户在界面上
+    # 看到的是"卡住不动"——实际每次重试要等满 llm_timeout，一轮就是好几分钟。
+    notices: list[str] = field(default_factory=list)
 
     llm_calls: int = 0
     tool_calls: int = 0
@@ -102,11 +124,22 @@ class ProgressTracker:
             self.tool_calls = 0
             self.tokens_in = 0
             self.tokens_out = 0
+            self.notices.clear()
             self._pause_gate.set()
             return True
 
     def wait_if_paused(self) -> None:
         self._pause_gate.wait()
+
+    def add_notice(self, text: str) -> None:
+        """记录一条面板可见的运行提示，只保留最近几条。"""
+        with self._lock:
+            if self.stop_requested or not text:
+                return
+            line = f"[{time.strftime('%H:%M:%S')}] {text}"
+            if line not in self.notices:
+                self.notices.append(line)
+            del self.notices[:-5]
 
     def mark_stopped(self) -> None:
         with self._lock:
@@ -124,6 +157,7 @@ class ProgressTracker:
             self.tool_calls = 0
             self.tokens_in = 0
             self.tokens_out = 0
+            self.notices.clear()
             self._pause_gate.set()
 
     def mark_stage_active(self, stage_id: str) -> None:

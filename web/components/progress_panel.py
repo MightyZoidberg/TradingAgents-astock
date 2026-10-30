@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from web.progress import PIPELINE_STAGES, ProgressTracker
+from web.progress import ANALYST_STAGE_IDS, ProgressTracker, visible_stages
 
 
 def _status_badge(status: str) -> str:
@@ -44,13 +44,22 @@ def render_progress(tracker: ProgressTracker) -> None:
     if tracker.is_paused:
         st.caption("当前分析已暂停。")
 
+    # 只统计/展示本次勾选的分析师 + 固定流水线阶段：没勾的阶段永远不完成，
+    # 计入总数会让进度条停在半路、也白占一格「待执行」。
+    stages = visible_stages(tracker.selected_analysts)
+
     completed = len(tracker.completed_stages)
-    total = len(PIPELINE_STAGES)
+    total = len(stages)
     pct = completed / total if total else 0
     st.progress(pct, text=f"{completed}/{total} 阶段完成  ·  {_format_time(tracker.elapsed)}")
 
-    analyst_stages = PIPELINE_STAGES[:7]
-    post_stages = PIPELINE_STAGES[7:]
+    # LLM 重试等运行提示：不展示的话，用户看到的只是"卡住不动"，
+    # 实际每次重试都在等满超时时间。
+    for line in tracker.notices:
+        st.caption(f"⚠️ {line}")
+
+    analyst_stages = [s for s in stages if s["id"] in ANALYST_STAGE_IDS]
+    post_stages = [s for s in stages if s["id"] not in ANALYST_STAGE_IDS]
 
     st.markdown(
         '<div style="margin:0.5rem 0 0.3rem; font-size:0.85rem; color:#888;">ANALYSTS</div>',
@@ -105,7 +114,7 @@ def render_progress(tracker: ProgressTracker) -> None:
 
     completed_reports = [
         (stage["name"], stage["icon"], tracker.stage_reports[stage["id"]])
-        for stage in PIPELINE_STAGES
+        for stage in stages
         if stage["id"] in tracker.stage_reports
     ]
 

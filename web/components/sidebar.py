@@ -19,6 +19,7 @@ from web.history import (
     get_incomplete_history,
     record_incomplete_task,
 )
+from web.progress import PIPELINE_STAGES
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,13 @@ _SCOPE_VALUES = ["off", "deep", "all"]
 #   The supported API model names are deepseek-flash, deepseek-v4-pro,
 #   but you passed custom.
 _CUSTOM_MODEL_SENTINEL = "custom"
+
+# 7 个分析师选项：id 与 web.progress.PIPELINE_STAGES 前 7 项、TradingAgentsGraph
+# 的 selected_analysts 完全一致，显示名与进度面板保持同一套叫法。
+_ANALYST_OPTIONS: list[tuple[str, str]] = [
+    (s["id"], f"{s['icon']} {s['name']}") for s in PIPELINE_STAGES[:7]
+]
+_ALL_ANALYST_IDS = [a for a, _ in _ANALYST_OPTIONS]
 
 
 def _resolve_model_value(value: str, text_key: str, label: str) -> str:
@@ -86,6 +94,13 @@ def validate_model_selection(config: dict | None = None) -> str | None:
     return None
 
 
+def validate_analyst_selection(selected: list[str] | None) -> str | None:
+    """拦住「一个分析项都没勾」，别让空列表进后台线程后才被建图拒绝。"""
+    if not selected:
+        return "至少勾选一个分析项（分析项越多耗时越长，可只勾需要的）。"
+    return None
+
+
 def _load_saved_llm_config() -> None:
     """Restore user's last model selection into session_state defaults."""
     try:
@@ -111,6 +126,15 @@ def _load_saved_llm_config() -> None:
     for key in ("custom_quick_model", "custom_deep_model"):
         if key in cfg and cfg[key]:
             st.session_state.setdefault(key, cfg[key])
+    # 分析项勾选也持久化。旧配置文件里没有该键 ⇒ setdefault 不写，
+    # multiselect 用自己的 default（全选 7 项），行为与升级前一致。
+    saved_analysts = [
+        a for a in cfg.get("selected_analysts", []) if a in _ALL_ANALYST_IDS
+    ]
+    if saved_analysts:
+        st.session_state.setdefault("selected_analysts", saved_analysts)
+    if cfg.get("llm_timeout"):
+        st.session_state.setdefault("llm_timeout_input", int(cfg["llm_timeout"]))
 
 
 def _save_llm_config() -> None:
@@ -121,6 +145,8 @@ def _save_llm_config() -> None:
         "deep_model_idx": st.session_state.get("deep_model_idx", 0),
         "llm_base_url": st.session_state.get("llm_base_url", ""),
         "subscription_scope": st.session_state.get("subscription_scope", "off"),
+        "selected_analysts": st.session_state.get("selected_analysts") or _ALL_ANALYST_IDS,
+        "llm_timeout": st.session_state.get("llm_timeout_input") or 150,
     }
     if st.session_state.get("agent_sdk_model"):
         cfg["agent_sdk_model"] = st.session_state["agent_sdk_model"]
@@ -321,6 +347,19 @@ def _render_llm_config() -> None:
             "Completions），模型 ID 手动填写，Key 在 .env 设 `OPENAI_COMPATIBLE_API_KEY`。"
         )
 
+    st.number_input(
+        "单次请求超时（秒）",
+        min_value=60,
+        max_value=900,
+        step=30,
+        key="llm_timeout_input",
+        help=(
+            "单次 LLM 请求的超时。请求已默认流式（边生成边收），正常无需调大；"
+            "网络差或仍频繁出现「Request timed out.」时可调到 300。"
+            "注意：超时后每次重试都要重新等满这段时间，调得越大、失败时等得越久。"
+        ),
+    )
+
     # ── 个人 Claude 订阅额度（可选，仅个人自用）────────────────────────
     _scope_labels = [
         "关闭（走上面选的供应商）",
@@ -414,6 +453,21 @@ def render_sidebar() -> None:
     if start_date >= trade_date:
         st.caption("⚠️ 起始日期应早于分析日期，已按最小窗口（5 天）处理。")
 
+    selected_analysts = st.multiselect(
+        "分析项（只跑勾选项）",
+        options=_ALL_ANALYST_IDS,
+        default=_ALL_ANALYST_IDS,
+        format_func=lambda a: dict(_ANALYST_OPTIONS)[a],
+        key="selected_analysts",
+        help=(
+            "勾选要运行的分析师。每项都是一整段独立的取数 + LLM 分析，"
+            "全选 7 项最耗时也最容易在中途超时；只勾关心的几项能成倍缩短时间。"
+            "质量门控 → 多空辩论 → 风控 → 最终决策始终会跑（它们消费勾选报告的结论）。"
+        ),
+    )
+    if len(selected_analysts) < len(_ALL_ANALYST_IDS):
+        st.caption(f"已选 {len(selected_analysts)}/{len(_ALL_ANALYST_IDS)} 项，其余项本次不运行。")
+
     with st.expander("⚙️ 模型配置", expanded=False):
         _render_llm_config()
 
@@ -429,9 +483,12 @@ def render_sidebar() -> None:
     ):
         _save_llm_config()  # persist model choice before running
         model_err = validate_model_selection()
+        analyst_err = validate_analyst_selection(selected_analysts)
         resolved_code, err = _resolve_user_input(ticker)
         if model_err:
             st.error(f"❌ {model_err}")
+        elif analyst_err:
+            st.error(f"❌ {analyst_err}")
         elif err:
             st.error(f"❌ {err}")
         else:
@@ -440,6 +497,7 @@ def render_sidebar() -> None:
             st.session_state["start_analysis"] = {
                 "ticker": resolved_code,
                 "trade_date": trade_date.strftime("%Y-%m-%d"),
+                "selected_analysts": selected_analysts,
                 "fresh": True,
             }
             st.session_state["viewing_history"] = None
@@ -472,6 +530,10 @@ def render_sidebar() -> None:
                 st.session_state["start_analysis"] = {
                     "ticker": t,
                     "trade_date": d,
+                    # 断点按节点名寻址：续跑必须用**当初那组勾选**重建图。
+                    # 旧版本记录的任务没有这个字段 ⇒ None ⇒ 消费端回落全选 7 项
+                    # （升级前的图本来就是全选建的，两边正好对上）。
+                    "selected_analysts": entry.get("selected_analysts"),
                 }
                 st.session_state["viewing_history"] = None
 

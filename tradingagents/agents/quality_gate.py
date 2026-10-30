@@ -65,11 +65,13 @@ def _hard_check_report(analyst_type: str, report: str) -> tuple:
 
 
 def _build_review_prompt(
-    reports: dict, trade_date: str, ticker: str
+    reports: dict, trade_date: str, ticker: str, selected: set
 ) -> str:
-    """Build the LLM review prompt."""
+    """Build the LLM review prompt. Only the analysts actually run are reviewed."""
     report_sections = []
     for analyst_type, field in REPORT_FIELDS.items():
+        if analyst_type not in selected:
+            continue
         name = ANALYST_NAMES[analyst_type]
         content = reports.get(field, "（未运行）")
         if not content:
@@ -80,7 +82,22 @@ def _build_review_prompt(
 
     all_reports = "\n\n".join(report_sections)
 
-    return f"""你是数据质量审核员。以下是 7 位分析师对 {ticker} 在 {trade_date} 的研究报告。请逐一审核。
+    # 表格行只列本次勾选的分析师：未勾选的分析师没有报告，列进去只会诱导
+    # LLM 给它们编一条「报告为空」的差评，整体评级也被这些无关行拉低。
+    row_templates = {
+        "market": "| 技术分析师 | A/B/C/D/F | 是否匹配交易日 | 列出缺失的必采项 | 简要说明 |",
+        "social": "| 情绪分析师 | ... | ... | ... | ... |",
+        "news": "| 新闻分析师 | ... | ... | ... | ... |",
+        "fundamentals": "| 基本面分析师 | ... | ... | ... | ... |",
+        "policy": "| 政策分析师 | ... | ... | ... | ... |",
+        "hot_money": "| 游资追踪师 | ... | ... | ... | ... |",
+        "lockup": "| 解禁监控师 | ... | ... | ... | ... |",
+    }
+    table_rows = "\n".join(
+        row_templates[a] for a in REPORT_FIELDS if a in selected
+    )
+
+    return f"""你是数据质量审核员。以下是 {len(selected)} 位分析师对 {ticker} 在 {trade_date} 的研究报告。请逐一审核。
 
 {all_reports}
 
@@ -94,13 +111,7 @@ def _build_review_prompt(
 
 | 分析师 | 评级 | 数据时效 | 缺失项 | 备注 |
 |--------|------|----------|--------|------|
-| 技术分析师 | A/B/C/D/F | 是否匹配交易日 | 列出缺失的必采项 | 简要说明 |
-| 情绪分析师 | ... | ... | ... | ... |
-| 新闻分析师 | ... | ... | ... | ... |
-| 基本面分析师 | ... | ... | ... | ... |
-| 政策分析师 | ... | ... | ... | ... |
-| 游资追踪师 | ... | ... | ... | ... |
-| 解禁监控师 | ... | ... | ... | ... |
+{table_rows}
 
 **整体评级**: A/B/C/D/F
 **数据可信度**: 高/中/低
@@ -115,13 +126,23 @@ def _build_review_prompt(
 """
 
 
-def create_quality_gate(llm):
+def create_quality_gate(llm, selected_analysts=None):
     """Factory for the data quality gate node.
 
     Sits between the last analyst Msg Clear and Bull Researcher.
     Layer 1: hard checks (code). Layer 2: LLM review (one call).
     Writes data_quality_summary to state for downstream consumers.
+
+    selected_analysts: 本次勾选运行的分析师列表。None = 全部 7 位（原行为）。
+    未勾选的分析师不参与硬检查与 LLM 复审——它们的报告本来就是空的，
+    按「报告为空」打 F 既误导读者，也会把 fail_count 推过阈值、误跳过复审。
     """
+
+    selected = (
+        set(selected_analysts)
+        if selected_analysts is not None
+        else set(REPORT_FIELDS)
+    )
 
     def quality_gate_node(state) -> dict:
         trade_date = state["trade_date"]
@@ -133,12 +154,18 @@ def create_quality_gate(llm):
 
         hard_results = {}
         for analyst_type, field in REPORT_FIELDS.items():
+            if analyst_type not in selected:
+                continue
             grade, detail = _hard_check_report(analyst_type, reports[field])
             hard_results[analyst_type] = (grade, detail)
 
         hard_summary_lines = []
-        for analyst_type, (grade, detail) in hard_results.items():
+        for analyst_type in REPORT_FIELDS:
             name = ANALYST_NAMES[analyst_type]
+            if analyst_type not in selected:
+                hard_summary_lines.append(f"- {name}: [—] 本次未选择运行")
+                continue
+            grade, detail = hard_results[analyst_type]
             hard_summary_lines.append(f"- {name}: [{grade}] {detail}")
         hard_summary = "\n".join(hard_summary_lines)
 
@@ -147,9 +174,14 @@ def create_quality_gate(llm):
         )
 
         llm_review = ""
-        if fail_count < 4:
+        # 复审只在「少数报告失败」时有意义。原阈值 fail_count < 4 是按 7 位分析师
+        # 校准的硬编码；按比例（失败数不过半）表达后，7 位全选时行为不变，
+        # 勾 2 位挂 1 位、勾 1 位挂 1 位这些新场景也各自合理。
+        if fail_count * 2 <= len(selected):
             try:
-                review_prompt = _build_review_prompt(reports, trade_date, ticker)
+                review_prompt = _build_review_prompt(
+                    reports, trade_date, ticker, selected
+                )
                 response = llm.invoke(review_prompt)
                 llm_review = response.content
             except Exception as e:

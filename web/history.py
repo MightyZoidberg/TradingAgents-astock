@@ -149,8 +149,14 @@ def record_incomplete_task(
     status: str,
     error: str | None = None,
     completed_stages: list[str] | None = None,
+    selected_analysts: list[str] | None = None,
 ) -> None:
-    """Upsert a resumable task entry."""
+    """Upsert a resumable task entry.
+
+    selected_analysts: 本次运行勾选的分析师。断点续跑必须用**同一份勾选**重建
+    LangGraph 图（checkpoint 按节点名寻址，换一组分析师就是另一张图），所以
+    要随任务记下来，恢复时原样带回。
+    """
     ticker = ticker.strip().upper()
     trade_date = trade_date.strip()
     if not ticker or not trade_date:
@@ -164,16 +170,17 @@ def record_incomplete_task(
             != _completed_key(ticker, trade_date)
         ]
         now = time.time()
-        entries.append(
-            {
-                "ticker": ticker,
-                "trade_date": trade_date,
-                "status": status,
-                "error": error or "",
-                "completed_stages": completed_stages or [],
-                "updated_at": now,
-            }
-        )
+        entry = {
+            "ticker": ticker,
+            "trade_date": trade_date,
+            "status": status,
+            "error": error or "",
+            "completed_stages": completed_stages or [],
+            "updated_at": now,
+        }
+        if selected_analysts:
+            entry["selected_analysts"] = list(selected_analysts)
+        entries.append(entry)
         entries.sort(key=lambda e: float(e.get("updated_at", 0)), reverse=True)
         _save_incomplete_index(entries)
 

@@ -2,14 +2,36 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import traceback
 from typing import Any
 
 from web.history import clear_incomplete_task, record_incomplete_task
-from web.progress import PIPELINE_STAGES, ProgressTracker
+from web.progress import ALL_ANALYST_IDS, PIPELINE_STAGES, ProgressTracker, visible_stages
 from web.stock_display import normalize_report_state_mentions, normalize_stock_mentions
+
+# LLM 应用层重试的 warning 从这个 logger 发出（openai_client.invoke）。
+_RETRY_LOGGER_NAME = "tradingagents.llm_clients.openai_client"
+
+
+class _RetryNoticeHandler(logging.Handler):
+    """把 LLM 重试 warning 转发到进度面板。
+
+    重试原本只写日志文件：每次重试要等满 llm_timeout（默认 150s），3 次重试
+    就是约 10 分钟，界面上却只是"卡住不动"——用户无从分辨是在干活还是在等死。
+    """
+
+    def __init__(self, tracker: ProgressTracker):
+        super().__init__(level=logging.WARNING)
+        self._tracker = tracker
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._tracker.add_notice(record.getMessage())
+        except Exception:  # noqa: BLE001 — 日志钩子绝不反噬主流程
+            pass
 
 
 _REPORT_KEY_TO_STAGE = {s["report_key"]: s["id"] for s in PIPELINE_STAGES}
@@ -80,10 +102,9 @@ def _detect_completed_stages(
 
 def _infer_active_stage(tracker: ProgressTracker) -> None:
     """Set the current_stage to the first non-completed stage."""
-    from web.progress import STAGE_IDS
-    for sid in STAGE_IDS:
-        if tracker.stage_status(sid) == "pending":
-            tracker.mark_stage_active(sid)
+    for stage in visible_stages(tracker.selected_analysts):
+        if tracker.stage_status(stage["id"]) == "pending":
+            tracker.mark_stage_active(stage["id"])
             return
 
 
@@ -95,6 +116,7 @@ def _run(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -
     stats = StatsCallbackHandler()
 
     graph = TradingAgentsGraph(
+        selected_analysts=tracker.selected_analysts,
         debug=True,
         config=config,
         callbacks=[stats],
@@ -140,6 +162,7 @@ def _run(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -
                 trade_date,
                 status="paused" if tracker.is_paused else "running",
                 completed_stages=tracker.completed_stages,
+                selected_analysts=tracker.selected_analysts,
             )
 
             s = stats.get_stats()
@@ -171,20 +194,35 @@ def run_analysis_in_thread(
     trade_date: str,
     config: dict,
     tracker: ProgressTracker,
+    selected_analysts: list[str] | None = None,
 ) -> threading.Thread:
-    """Launch the pipeline in a daemon thread. Returns the thread handle."""
+    """Launch the pipeline in a daemon thread. Returns the thread handle.
+
+    selected_analysts: 本次勾选要跑的分析师（PIPELINE_STAGES 前 7 项的 id 子集）。
+    None = 全部 7 个（原行为）。至少要有一个——空列表会被 TradingAgentsGraph
+    在建图时拒绝，这里提前归一成默认，避免把明显非法的输入送进后台线程。
+    """
+    analysts = [a for a in (selected_analysts or ALL_ANALYST_IDS) if a in ALL_ANALYST_IDS]
+    if not analysts:
+        analysts = list(ALL_ANALYST_IDS)
+
     tracker.ticker = ticker
     tracker.trade_date = trade_date
+    tracker.selected_analysts = analysts
     tracker.is_running = True
-    tracker.mark_stage_active("market")
+    tracker.mark_stage_active(visible_stages(analysts)[0]["id"])
     record_incomplete_task(
         ticker,
         trade_date,
         status="running",
         completed_stages=tracker.completed_stages,
+        selected_analysts=analysts,
     )
 
     def _target() -> None:
+        notice_handler = _RetryNoticeHandler(tracker)
+        retry_logger = logging.getLogger(_RETRY_LOGGER_NAME)
+        retry_logger.addHandler(notice_handler)
         try:
             _run(ticker, trade_date, config, tracker)
         except Exception as exc:
@@ -201,8 +239,11 @@ def run_analysis_in_thread(
                 status="error",
                 error=str(exc),
                 completed_stages=tracker.completed_stages,
+                selected_analysts=tracker.selected_analysts,
             )
             tracker.mark_error(str(exc))
+        finally:
+            retry_logger.removeHandler(notice_handler)
 
     t = threading.Thread(target=_target, daemon=True)
     t.start()

@@ -104,14 +104,16 @@ class TestOpenCodeGoStreaming:
         assert llm.streaming is True
         assert isinstance(llm, DeepSeekChatOpenAI)
 
-    def test_non_opencode_base_url_keeps_streaming_off(self, monkeypatch):
+    def test_non_opencode_base_url_streams_by_default_too(self, monkeypatch):
+        # v0.5.22 起流式是所有走本客户端请求的默认值（防思考型模型被读超时
+        # 误杀），普通网关不再区别于 opencode；DeepSeek 子类仍只按模型判定。
         monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "k")
         client = OpenAIClient(
             "deepseek-v4-pro", base_url="https://relay.example/v1",
             provider="openai_compatible",
         )
         llm = client.get_llm()
-        assert llm.streaming is False
+        assert llm.streaming is True
         assert not isinstance(llm, DeepSeekChatOpenAI)
 
     def test_opencode_go_non_deepseek_model_streams_but_no_subclass(self, monkeypatch):

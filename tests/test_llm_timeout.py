@@ -555,11 +555,20 @@ class TestStreamingKeepsUsageStats:
                            provider="deepseek", stream_usage=False).get_llm()
         assert llm._should_stream_usage(None) is False
 
-    def test_non_streaming_path_unchanged(self, monkeypatch):
-        # 非流式本来就带用量，不该被动到。
-        monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "k")
-        llm = OpenAIClient("deepseek-chat", base_url="https://api.deepseek.com",
-                           provider="deepseek", timeout=150).get_llm()
+    def test_all_providers_stream_by_default(self, monkeypatch):
+        # v0.5.22 起流式从 opencode 专用推广为默认：思考型模型（GLM-5.x 等）
+        # 非流式下整段答案生成完才回包，150s 读超时会把"还在干活"的请求掐死
+        # （实测 Bull Researcher 一节点烧满 4×150s 重试才报错）。
+        monkeypatch.setenv("ZHIPU_API_KEY", "k")
+        llm = OpenAIClient("glm-5.3-flash", provider="glm", timeout=150).get_llm()
+        assert llm.streaming is True
+        assert llm._should_stream_usage(None) is True
+
+    def test_explicit_streaming_false_is_respected(self, monkeypatch):
+        # streaming 也进了 _PASSTHROUGH_KWARGS：显式关掉时以用户的为准。
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "k")
+        llm = OpenAIClient("deepseek-chat", provider="deepseek",
+                           streaming=False).get_llm()
         assert llm.streaming is False
 
 

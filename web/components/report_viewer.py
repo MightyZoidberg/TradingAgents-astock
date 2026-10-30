@@ -90,6 +90,9 @@ def _start_reanalysis_button(
             "ticker": ticker,
             "trade_date": trade_date,
             "fresh": True,
+            # 重新分析是全新一跑（fresh 会清断点），用侧栏**当前**勾选即可；
+            # 侧栏还没渲染过时为 None，消费端回落全选。
+            "selected_analysts": st.session_state.get("selected_analysts"),
         }
         st.session_state["viewing_history"] = None
         st.rerun()

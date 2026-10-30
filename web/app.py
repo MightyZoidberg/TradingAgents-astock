@@ -22,9 +22,13 @@ from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 
 from web.components.progress_panel import render_progress  # noqa: E402
 from web.components.report_viewer import render_report  # noqa: E402
-from web.components.sidebar import render_sidebar, validate_model_selection  # noqa: E402
+from web.components.sidebar import (  # noqa: E402
+    render_sidebar,
+    validate_analyst_selection,
+    validate_model_selection,
+)
 from web.history import clear_incomplete_task, extract_signal, load_analysis  # noqa: E402
-from web.progress import ProgressTracker  # noqa: E402
+from web.progress import ALL_ANALYST_IDS, ProgressTracker  # noqa: E402
 from web.runner import run_analysis_in_thread  # noqa: E402
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -173,6 +177,8 @@ def _build_config() -> dict:
     }
     # Analysis window (#16): start-date input in the sidebar → look-back days.
     config["market_lookback_days"] = st.session_state.get("market_lookback_days")
+    # 侧栏「单次请求超时（秒）」→ llm_timeout；不填回落 DEFAULT_CONFIG 的 150。
+    config["llm_timeout"] = int(st.session_state.get("llm_timeout_input") or 150)
     config["max_debate_rounds"] = 1
     config["max_risk_discuss_rounds"] = 1
     config["checkpoint_enabled"] = True
@@ -216,28 +222,38 @@ if start_req:
     if model_error:
         st.error(f"❌ {model_error}")
     else:
-        if start_req.get("fresh"):
-            from tradingagents.graph.checkpointer import clear_checkpoint
+        # 勾选的分析项。各生产者含义：侧栏「开始分析」= 用户当前勾选；
+        # 「未完成任务」续跑 = 记录里存的那组（断点续跑必须原样重建图），
+        # 旧任务记录没有该字段 ⇒ 回落全选 7 项（升级前的图就是全选建的）。
+        selected_analysts = start_req.get("selected_analysts") or list(ALL_ANALYST_IDS)
+        analyst_error = validate_analyst_selection(selected_analysts)
+        if analyst_error:
+            st.error(f"❌ {analyst_error}")
+        else:
+            if start_req.get("fresh"):
+                from tradingagents.graph.checkpointer import clear_checkpoint
 
-            clear_incomplete_task(start_req["ticker"], start_req["trade_date"])
-            clear_checkpoint(
-                DEFAULT_CONFIG["data_cache_dir"],
-                start_req["ticker"],
-                start_req["trade_date"],
+                clear_incomplete_task(start_req["ticker"], start_req["trade_date"])
+                clear_checkpoint(
+                    DEFAULT_CONFIG["data_cache_dir"],
+                    start_req["ticker"],
+                    start_req["trade_date"],
+                )
+
+            tracker = ProgressTracker(
+                ticker=start_req["ticker"],
+                trade_date=start_req["trade_date"],
             )
-
-        tracker = ProgressTracker(
-            ticker=start_req["ticker"],
-            trade_date=start_req["trade_date"],
-        )
-        st.session_state["tracker"] = tracker
-        st.session_state["viewing_history"] = None
-        run_analysis_in_thread(
-            ticker=start_req["ticker"],
-            trade_date=start_req["trade_date"],
-            config=config,
-            tracker=tracker,
-        )
+            tracker.selected_analysts = selected_analysts
+            st.session_state["tracker"] = tracker
+            st.session_state["viewing_history"] = None
+            run_analysis_in_thread(
+                ticker=start_req["ticker"],
+                trade_date=start_req["trade_date"],
+                config=config,
+                tracker=tracker,
+                selected_analysts=selected_analysts,
+            )
 
 
 # ── Main area state machine ─────────────────────────────────────────────────
@@ -280,6 +296,7 @@ elif tracker and tracker.error:
         st.session_state["start_analysis"] = {
             "ticker": tracker.ticker,
             "trade_date": tracker.trade_date,
+            "selected_analysts": tracker.selected_analysts,
         }
         st.session_state["viewing_history"] = None
         st.rerun()
@@ -316,7 +333,8 @@ else:
                 color: #666;
                 font-size: 0.9rem;
             ">
-                ← 在左侧输入股票代码，开始分析
+                ← 在左侧输入股票代码、勾选分析项，开始分析。<br>
+                默认勾选全部 7 位分析师；只勾关心的几项可大幅缩短耗时。
             </div>
             <div style="
                 margin-top: 2.5rem;

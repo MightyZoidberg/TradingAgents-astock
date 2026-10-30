@@ -361,9 +361,11 @@ streamlit run web/app.py
 ### 功能
 
 - **配置记住**：侧栏选的供应商 / 模型 / Base URL / 订阅覆盖写入 `~/.tradingagents/llm_config.json`，重开标签页或重启后自动恢复（v0.5.17）
-- **模型自选**：侧边栏支持 10 个 LLM 供应商切换（MiniMax/DeepSeek/Qwen/GLM/OpenAI/Anthropic/Google/xAI/OpenRouter/Ollama），外加 **「OpenAI 兼容（自定义 base_url）」** 一档可接任意 OpenAI 兼容网关（9Router / AI Router / 自建代理）
+- **模型自选**：侧边栏支持 10 个 LLM 供应商切换（MiniMax/DeepSeek/Qwen/GLM/OpenAI/Anthropic/Google/xAI/OpenRouter/Ollama），外加 **「OpenAI 兼容（自定义 base_url）」** 一档可接任意 OpenAI 兼容网关（9Router / AI Router / 自建代理）；「单次请求超时（秒）」可调（默认 150）
+- **流式防超时**：LLM 请求默认走流式聚合——思考型模型（GLM-5.x / MiniMax M2 / DeepSeek R 系）边生成边收，不会被读超时误杀；重试时进度面板会显示「第 n 次重试」而不是看似卡死
 - **一键分析**：输入 6 位 A 股代码 + 分析日期 +「数据起始日期」（默认本月第一天，可自定义技术分析回溯区间，支持按月/自定义时段分析），点击「开始分析」
-- **实时进度**：12 阶段 pipeline 实时显示（7 分析师 → 质量门控 → 辩论 → 风控 → 决策），所有已完成阶段的报告均可展开查看
+- **分析项勾选**：「分析项（只跑勾选项）」多选框可只勾需要的分析师（默认全选 7 项）——没勾的不进图、不调 LLM 和数据接口，只勾两三项能成倍缩短耗时；质量门控 → 辩论 → 风控 → 最终决策始终运行。勾选随配置一起记住，断点续跑自动沿用当初那组勾选
+- **实时进度**：12 阶段 pipeline 实时显示（7 分析师 → 质量门控 → 辩论 → 风控 → 决策），所有已完成阶段的报告均可展开查看；勾选了部分分析项时只显示对应阶段
 - **完整报告**：信号卡片（Buy/Hold/Sell）、7 份分析师报告、多空辩论、风控评估
 - **报告导出**：一键下载 **Markdown**（零依赖，永远可用）或 **PDF** 完整分析报告（PDF 自动适配 Windows/macOS/Linux 中文字体）
 - **历史记录**：自动保存并展示所有历史分析

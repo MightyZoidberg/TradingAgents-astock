@@ -111,8 +111,10 @@ class GraphSetup:
             delete_nodes["lockup"] = create_msg_delete()
             tool_nodes["lockup"] = self.tool_nodes["lockup"]
 
-        # Create quality gate node
-        quality_gate_node = create_quality_gate(self.llm_for("quality_gate"))
+        # Create quality gate node（只审核本次勾选运行的分析师）
+        quality_gate_node = create_quality_gate(
+            self.llm_for("quality_gate"), selected_analysts
+        )
 
         # Create researcher and manager nodes
         bull_researcher_node = create_bull_researcher(self.llm_for("bull"))

@@ -263,8 +263,11 @@ def test_reanalysis_starts_a_fresh_run(monkeypatch):
     except AssertionError as exc:
         assert str(exc) == "rerun should not be triggered in this test"
 
+    # selected_analysts=None：重新分析是全新一跑，勾选用侧栏**当前**选择；
+    # 测试里侧栏没渲染 ⇒ None，消费端（web/app.py）回落全选 7 项。
     assert fake_st.session_state["start_analysis"] == {
         "ticker": "300476",
         "trade_date": "2026-06-04",
         "fresh": True,
+        "selected_analysts": None,
     }
